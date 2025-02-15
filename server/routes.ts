@@ -1,10 +1,12 @@
-import { Express, Request, Response } from "express";
+import type { Express } from "express";
 import { createServer } from "http";
 import { storage } from "./storage";
-import { insertUserSchema, insertOrderSchema } from "@shared/schema";
+import { insertUserSchema } from "@shared/schema";
 import { z } from "zod";
 
 export async function registerRoutes(app: Express) {
+  const httpServer = createServer(app);
+
   // Products
   app.get("/api/products", async (req, res) => {
     const products = await storage.getProducts();
@@ -16,56 +18,72 @@ export async function registerRoutes(app: Express) {
     res.json(products);
   });
 
-  app.get("/api/products/:id", async (req, res) => {
-    const product = await storage.getProduct(parseInt(req.params.id));
-    if (!product) {
-      res.status(404).json({ message: "Product not found" });
-      return;
+  // Auth
+  app.post("/api/auth/register", async (req, res) => {
+    try {
+      const userData = insertUserSchema.parse(req.body);
+      const user = await storage.createUser(userData);
+      req.session.userId = user.id;
+      res.json({ id: user.id, username: user.username });
+    } catch (error) {
+      res.status(400).json({ error: "Invalid user data" });
     }
-    res.json(product);
+  });
+
+  app.post("/api/auth/login", async (req, res) => {
+    const { username, password } = req.body;
+    const user = await storage.getUserByUsername(username);
+    
+    if (user && user.password === password) {
+      req.session.userId = user.id;
+      res.json({ id: user.id, username: user.username });
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
   });
 
   // Orders
   app.post("/api/orders", async (req, res) => {
+    if (!req.session.userId) {
+      return res.status(401).json({ error: "Not authenticated" });
+    }
+
+    const orderSchema = z.object({
+      total: z.number(),
+      items: z.array(z.object({
+        productId: z.number(),
+        quantity: z.number(),
+        price: z.number()
+      }))
+    });
+
     try {
-      const order = insertOrderSchema.parse(req.body);
-      const created = await storage.createOrder(order);
-      res.status(201).json(created);
+      const { total, items } = orderSchema.parse(req.body);
+      const order = await storage.createOrder(req.session.userId, total);
+      
+      for (const item of items) {
+        await storage.addOrderItem(
+          order.id,
+          item.productId,
+          item.quantity,
+          item.price
+        );
+      }
+
+      res.json(order);
     } catch (error) {
-      res.status(400).json({ message: "Invalid order data" });
+      res.status(400).json({ error: "Invalid order data" });
     }
   });
 
   app.get("/api/orders", async (req, res) => {
-    const userId = parseInt(req.query.userId as string);
-    if (!userId) {
-      res.status(400).json({ message: "userId is required" });
-      return;
+    if (!req.session.userId) {
+      return res.status(401).json({ error: "Not authenticated" });
     }
-    const orders = await storage.getOrders(userId);
+
+    const orders = await storage.getOrdersByUser(req.session.userId);
     res.json(orders);
   });
 
-  app.get("/api/orders/:id", async (req, res) => {
-    const order = await storage.getOrder(parseInt(req.params.id));
-    if (!order) {
-      res.status(404).json({ message: "Order not found" });
-      return;
-    }
-    res.json(order);
-  });
-
-  // Users
-  app.post("/api/users", async (req, res) => {
-    try {
-      const user = insertUserSchema.parse(req.body);
-      const created = await storage.createUser(user);
-      res.status(201).json(created);
-    } catch (error) {
-      res.status(400).json({ message: "Invalid user data" });
-    }
-  });
-
-  const httpServer = createServer(app);
   return httpServer;
 }
